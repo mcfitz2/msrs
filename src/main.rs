@@ -1,5 +1,12 @@
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(bound(deserialize = "'de: 'a"))]
+struct ProductsJson<'a> {
+    products: Vec<models::ProductInfo<'a>>,
+    stores: Vec<models::Store>
+}
+
 /// Returns the bundled product list as Vec<ProductInfo>
-fn bundled_products() -> Vec<msrs::metalsupermarkets::models::ProductInfo<'static>> {
+fn bundled_products() -> ProductsJson<'static> {
     let bytes = include_bytes!("./resources/products.json");
     serde_json::from_slice(bytes).expect("Failed to parse bundled products.json")
 }
@@ -14,7 +21,9 @@ impl Drop for ChromedriverGuard {
 }
 
 
+use msrs::metalsupermarkets::models;
 use reqwest::cookie::CookieStore;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
@@ -56,6 +65,10 @@ enum Commands {
     },
     /// Products scraping commands
     Products {
+        #[command(subcommand)]
+        subcmd: Subcommand,
+    },
+    Stores {
         #[command(subcommand)]
         subcmd: Subcommand,
     },
@@ -159,8 +172,8 @@ async fn main() {
     match cli.command {
         Commands::Order { input, username, password, store_id } => {
             // ...existing order logic...
-            let file = File::open(&input).unwrap_or_else(|e| {
-                eprintln!("Failed to open file {}: {}", &input, e);
+            let file = File::open(&input).unwrap_or_else(|_| {
+                eprintln!("Could not open the input file. Please check the path and try again.");
                 process::exit(1);
             });
             let mut rdr = csv::Reader::from_reader(file);
@@ -168,7 +181,7 @@ async fn main() {
             let required = ["ID", "SKU", "Qualifier A", "Qualifier B", "Qualifier C", "Length", "Width"];
             for &col in &required {
                 if !headers.iter().any(|h| h == col) {
-                    eprintln!("Missing required column: {}", col);
+                    eprintln!("Input file is missing a required column: '{}'.", col);
                     process::exit(1);
                 }
             }
@@ -189,24 +202,25 @@ async fn main() {
                 *part_map.entry(part).or_insert(0) += 1;
             }
             let deduped: Vec<Part> = part_map.into_iter().map(|(mut part, qty)| { part.quantity = qty; part }).collect();
-            println!("Logging in as {}...", username);
+            println!("Logging in...");
             let api = ApiClient::new();
             let login_res = api.login(&username, &password).await;
             match login_res {
                 Ok(resp) => {
                     if resp.status().is_success() {
-                        println!("Login successful");
+                        println!("Login successful.");
                     } else {
-                        eprintln!("Login failed: {}", resp.status());
+                        eprintln!("Login failed. Please check your credentials and try again.");
                         process::exit(1);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Login error: {}", e);
+                Err(_) => {
+                    eprintln!("Could not connect to the login service. Please try again later.");
                     process::exit(1);
                 }
             }
-            for part in &deduped {
+            for (idx, part) in deduped.iter().enumerate() {
+                println!("Adding item {} of {} to cart...", idx + 1, deduped.len());
                 let params = AddToCartParams {
                     action: "put_addtocart",
                     store_id: &store_id,
@@ -222,13 +236,13 @@ async fn main() {
                 let res = api.add_to_cart(params).await;
                 match res {
                     Ok(resp) => {
-                        let status = resp.status();
-                        match resp.text().await {
-                            Ok(body) => println!("Add to cart response for {:?} (status: {}):\n{}", part, status, body),
-                            Err(e) => println!("Add to cart response for {:?} (status: {}): <failed to read body: {}>", part, status, e),
+                        if resp.status().is_success() {
+                            println!("Item added to cart.");
+                        } else {
+                            println!("Could not add item to cart (server returned error).");
                         }
                     }
-                    Err(e) => eprintln!("Failed to add to cart: {:?} ({})", part, e),
+                    Err(_) => println!("Could not add item to cart (network error)."),
                 }
             }
 
@@ -261,14 +275,30 @@ async fn main() {
         Commands::Products { subcmd } => {
             match subcmd {
                 Subcommand::List => {
-                    let products = bundled_products();
+                    let products = bundled_products().products;
                     if products.is_empty() {
                         println!("No products found in bundled products");
                     } else {
                         println!("Products:");
                         println!("{}", "-".repeat(60));
                         for product in &products {
-                            println!("{} || SKU: {} | ID: {} | Size: {} X {}", product.description, product.sku, product.id, product.qualifier_a, product.qualifier_b);
+                            println!("{} || SKU: {} | ID: {} | Size: {} X {}", format!("{: <35}", product.description), format!("{: <19}", product.sku), product.id, product.qualifier_a, product.qualifier_b);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Stores { subcmd } => {
+            match subcmd {
+                Subcommand::List => {
+                    let stores = bundled_products().stores;
+                    if stores.is_empty() {
+                        println!("No products found in bundled products");
+                    } else {
+                        println!("Stores:");
+                        println!("{}", "-".repeat(60));
+                        for store in &stores {
+                            println!("{} || ID: {}", format!("{: <30}", store.name), store.id);
                         }
                     }
                 }

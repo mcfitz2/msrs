@@ -15,6 +15,5 @@ pub struct ProductInfo<'a> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Store {
 	pub id: String,
-	pub page_id: String,
 	pub name: String,
 }

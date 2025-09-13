@@ -1,10 +1,11 @@
 use super::models;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use std::fs::File;
 use serde_json;
 // --- Pipeline fetcher functions ---
 #[allow(dead_code)]
-pub async fn fetch_metals(category_url: &str) -> Result<Vec<String>, reqwest::Error> {
+pub async fn fetch_metals(category_url: &str) -> Result<std::collections::HashSet<String>, reqwest::Error> {
+    use std::collections::HashSet;
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap();
     let url = category_url.to_string();
     let mut last_err = None;
@@ -14,7 +15,7 @@ pub async fn fetch_metals(category_url: &str) -> Result<Vec<String>, reqwest::Er
                 Ok(text) => {
                     let document = Html::parse_document(&text);
                     let selector = Selector::parse("div.products-list-container a").unwrap();
-                    let metals: Vec<String> = document
+                    let metals: HashSet<String> = document
                         .select(&selector)
                         .filter_map(|el| {
                             let url = el.value().attr("href")?.to_string();
@@ -39,7 +40,8 @@ pub async fn fetch_metals(category_url: &str) -> Result<Vec<String>, reqwest::Er
 }
 
 #[allow(dead_code)]
-pub async fn fetch_shapes(metal_url: String) -> Result<Vec<String>, reqwest::Error> {
+pub async fn fetch_shapes(metal_url: String) -> Result<std::collections::HashSet<String>, reqwest::Error> {
+    use std::collections::HashSet;
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap();
     let mut last_err = None;
     for attempt in 1..=3 {
@@ -48,7 +50,7 @@ pub async fn fetch_shapes(metal_url: String) -> Result<Vec<String>, reqwest::Err
                 Ok(text) => {
                     let document = Html::parse_document(&text);
                     let selector = Selector::parse("div > a").unwrap();
-                    let links: Vec<String> = document
+                    let links: HashSet<String> = document
                         .select(&selector)
                         .filter(|el| el.value().attr("href").map_or(false, |h| h.contains("/metals/")))
                         .filter_map(|el| el.value().attr("href").map(|h| h.to_string()))
@@ -66,7 +68,8 @@ pub async fn fetch_shapes(metal_url: String) -> Result<Vec<String>, reqwest::Err
 }
 
 #[allow(dead_code)]
-pub async fn fetch_products(shape_url: String) -> Result<Vec<String>, reqwest::Error> {
+pub async fn fetch_products(shape_url: String) -> Result<std::collections::HashSet<String>, reqwest::Error> {
+    use std::collections::HashSet;
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap();
     let mut last_err = None;
     for attempt in 1..=3 {
@@ -74,12 +77,18 @@ pub async fn fetch_products(shape_url: String) -> Result<Vec<String>, reqwest::E
             Ok(resp) => match resp.text().await {
                 Ok(text) => {
                     let document = Html::parse_document(&text);
-                    let selector = Selector::parse("a").unwrap();
-                    let links: Vec<String> = document
-                        .select(&selector)
-                        .filter(|el| el.value().attr("href").map_or(false, |h| h.contains("/product/")))
-                        .filter_map(|el| el.value().attr("href").map(|h| h.to_string()))
-                        .collect();
+                    let main_selector = Selector::parse("main").unwrap();
+                    let a_selector = Selector::parse("a").unwrap();
+                    let mut links = HashSet::new();
+                    if let Some(main) = document.select(&main_selector).next() {
+                        for el in main.select(&a_selector) {
+                            if let Some(href) = el.value().attr("href") {
+                                if href.contains("/product/") {
+                                    links.insert(href.to_string());
+                                }
+                            }
+                        }
+                    }
                     return Ok(links);
                 }
                 Err(e) => last_err = Some(e),
@@ -149,7 +158,7 @@ pub async fn fetch_product_skus_and_ids(product_url: String) -> Result<Vec<model
                                 requires_length,
                                 requires_width
                             };
-                            println!("[DEBUG] Parsed product: {:#?}", product);
+                            //println!("[DEBUG] Parsed product: {:#?}", product);
                             products.push(product);
                         }
                     }
@@ -169,48 +178,43 @@ async fn fetch_stores() -> Result<Vec<models::Store>, reqwest::Error> {
     let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().unwrap();
     let resp = client.get("https://www.metalsupermarkets.com/store-finder/").send().await?.text().await?;
     let document = Html::parse_document(&resp);
-    let store_selector = Selector::parse("div.locationlists").unwrap();
-    let name_selector: Selector = Selector::parse("div.locdetail-left > div > h4 > a").unwrap();
-    let btn_selector: Selector = Selector::parse("div.locdetail-right > div.myStore-button > p > strong > a").unwrap();
-
-    let stores: Vec<models::Store> = document.select(&store_selector).map(|div: scraper::ElementRef<'_>| -> models::Store {
-        println!("Div being parsed {:#?}", div);
-        let btns = div.select(&btn_selector);
-        println!("{:#?}", btns.into_iter());
-        models::Store {
-            // id: btn.value().attr("data-storeid").unwrap().to_string(),
-            // page_id: btn.value().attr("data-storeid").unwrap().to_string(),
-            // name: div.select(&name_selector).nth(0).unwrap().text().nth(0).unwrap().to_string()
-            id: "ID".to_string(),
-            page_id: "pageID".to_string(),
-            name: "name".to_string()
+    let btn_selector = Selector::parse("a.mystoresetbtn").unwrap();
+    let h4_selector = Selector::parse("h4 > a").unwrap();
+    let location_selector = Selector::parse("div.locationlists").unwrap();
+    Ok(document.select(&location_selector).map(|div| -> Option<models::Store> {
+        if let (Some(btn_element), Some(name_element)) = (div.select(&btn_selector).next(), div.select(&h4_selector).next()) {
+            Some(models::Store {
+                id: btn_element.value().attr("data-storeid").unwrap().to_string(),
+                name: name_element.text().next().unwrap().to_string(),
+            })
+        } else {
+            // println!("------------------------------------------------------------------");
+            // println!("{:#?}", div.inner_html());
+            // this currently fails when there is no "set as my store" button
+            None
         }
-    }).collect();
-    Ok(stores)
+    }).flatten().collect())
 }
 
 
 #[allow(dead_code)]
 pub async fn gather() {
-
-    let mut products = Vec::new();
+    let mut products: Vec<models::ProductInfo> = Vec::new();
 
     let metals = fetch_metals("https://www.metalsupermarkets.com/metals").await.expect("Failed to fetch metals");
     let total_filtered = metals.len();
-    for (i, metal_url) in metals.into_iter().enumerate() {
+    for (i, metal_url) in metals.iter().enumerate() {
         println!("[DEBUG] Processing metal {} of {}: {}", i + 1, total_filtered, metal_url);
         if let Ok(shapes) = fetch_shapes(metal_url.clone()).await {
             let total_shapes = shapes.len();
-            for (j, shape_url) in shapes.into_iter().enumerate() {
+            for (j, shape_url) in shapes.iter().enumerate() {
                 println!("[DEBUG]   Processing shape {} of {}: {}", j + 1, total_shapes, shape_url);
                 if let Ok(product_urls) = fetch_products(shape_url.clone()).await {
                     let total_products = product_urls.len();
-                    for (k, product_url) in product_urls.into_iter().enumerate() {
+                    for (k, product_url) in product_urls.iter().enumerate() {
                         println!("[DEBUG]     Processing product {} of {}: {}", k + 1, total_products, product_url);
                         if let Ok(infos) = fetch_product_skus_and_ids(product_url.clone()).await {
-                            for info in infos {
-                                products.push(info);
-                            }
+                            products.extend(infos)
                         } else {
                             println!("[DEBUG]     Failed to fetch product SKUs/IDs for {}", product_url);
                         }
@@ -224,7 +228,20 @@ pub async fn gather() {
         }
     }
 
-    // Write to src/resources/products.json
+    // Fetch stores
+    let stores = match fetch_stores().await {
+        Ok(s) => s,
+        Err(e) => {
+            println!("[DEBUG] Failed to fetch stores: {}", e);
+            Vec::new()
+        }
+    };
+
+    // Write both products and stores to src/resources/products.json as an object
     let file = File::create("src/resources/products.json").expect("Failed to create products.json");
-    serde_json::to_writer_pretty(file, &products).expect("Failed to write products.json");
+    let output = serde_json::json!({
+        "products": products,
+        "stores": stores
+    });
+    serde_json::to_writer_pretty(file, &output).expect("Failed to write products.json");
 }
